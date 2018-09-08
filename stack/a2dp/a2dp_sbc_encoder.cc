@@ -71,6 +71,17 @@
 // SBC HD alternative bitrate property
 #define A2DP_SBC_HD_PROP "persist.bluetooth.sbc_hd_higher_bitrate"
 
+/*
+ * SBC Dual Channel (SBC HD) 2DH5 alternative bitrates.
+ * 648 kbps @ 48 khz, 595.4 kbps @ 44.1 khz.
+ * Up to 3 frames for 2DH5.
+ */
+#define A2DP_SBC_2DH5_ALT_BITRATE 596
+#define A2DP_SBC_2DH5_ALT_48KHZ_BITRATE 649
+
+// SBC HD alternative bitrate property
+#define A2DP_SBC_HD_PROP "persist.bluetooth.sbc_hd_higher_bitrate"
+
 #define A2DP_SBC_NON_EDR_MAX_RATE 229
 
 #define A2DP_SBC_MAX_PCM_ITER_NUM_PER_TICK 3
