@@ -35,6 +35,9 @@
 #include "osi/include/osi.h"
 #include "osi/include/properties.h"
 
+#define MIN_3MBPS_AVDTP_SAFE_MTU 801
+
+
 /* Buffer pool */
 #define A2DP_SBC_BUFFER_SIZE BT_DEFAULT_BUFFER_SIZE
 
@@ -54,7 +57,8 @@
  * Up to 5 frames for 3DH5.
  */
 #define A2DP_SBC_3DH5_DEFAULT_BITRATE 552
-#define A2DP_SBC_3DH5_48KHZ_BITRATE 601
+#define A2DP_SBC_3DH5_BITRATE 651
+#define A2DP_SBC_3DH5_48KHZ_BITRATE 696
 
 /*
  * SBC Dual Channel (SBC HD) 2DH5 alternative bitrates.
@@ -123,6 +127,7 @@ typedef struct {
   bool is_peer_edr;         /* True if the peer device supports EDR */
   bool peer_supports_3mbps; /* True if the peer device supports 3Mbps EDR */
   uint16_t peer_mtu;        /* MTU of the A2DP peer */
+  RawAddress peer_address;
   uint32_t timestamp;       /* Timestamp for the A2DP frames */
   SBC_ENC_PARAMS sbc_encoder_params;
   tA2DP_FEEDING_PARAMS feeding_params;
@@ -145,7 +150,7 @@ static void a2dp_sbc_get_num_frame_iteration(uint8_t* num_of_iterations,
                                              uint8_t* num_of_frames,
                                              uint64_t timestamp_us);
 static uint8_t calculate_max_frames_per_packet(void);
-static uint16_t a2dp_sbc_source_rate();
+static uint16_t a2dp_sbc_source_rate(int bitrate);
 static uint32_t a2dp_sbc_frame_length(void);
 
 bool A2DP_LoadEncoderSbc(void) {
@@ -171,7 +176,10 @@ void a2dp_sbc_encoder_init(const tA2DP_ENCODER_INIT_PEER_PARAMS* p_peer_params,
   a2dp_sbc_encoder_cb.is_peer_edr = p_peer_params->is_peer_edr;
   a2dp_sbc_encoder_cb.peer_supports_3mbps = p_peer_params->peer_supports_3mbps;
   a2dp_sbc_encoder_cb.peer_mtu = p_peer_params->peer_mtu;
+  a2dp_sbc_encoder_cb.peer_address = p_peer_params->peer_address;
   a2dp_sbc_encoder_cb.timestamp = 0;
+
+  LOG_ERROR(LOG_TAG, "%s: peer: %s", __func__, p_peer_params->peer_address.ToString().c_str());
 
   // NOTE: Ignore the restart_input / restart_output flags - this initization
   // happens when the connection is (re)started.
@@ -188,6 +196,7 @@ bool A2dpCodecConfigSbcSource::updateEncoderUserConfig(
   a2dp_sbc_encoder_cb.is_peer_edr = p_peer_params->is_peer_edr;
   a2dp_sbc_encoder_cb.peer_supports_3mbps = p_peer_params->peer_supports_3mbps;
   a2dp_sbc_encoder_cb.peer_mtu = p_peer_params->peer_mtu;
+  a2dp_sbc_encoder_cb.peer_address = p_peer_params->peer_address;
   a2dp_sbc_encoder_cb.timestamp = 0;
 
   if (a2dp_sbc_encoder_cb.peer_mtu == 0) {
@@ -197,6 +206,8 @@ bool A2dpCodecConfigSbcSource::updateEncoderUserConfig(
               __func__, name().c_str());
     return false;
   }
+
+  LOG_ERROR(LOG_TAG, "%s: name=%s", __func__, name().c_str());
 
   a2dp_sbc_encoder_update(a2dp_sbc_encoder_cb.peer_mtu, this, p_restart_input,
                           p_restart_output, p_config_updated);
@@ -220,6 +231,7 @@ static void a2dp_sbc_encoder_update(uint16_t peer_mtu,
   uint8_t protect = 0;
   int min_bitpool;
   int max_bitpool;
+  char strBitRate[16];
 
   *p_restart_input = false;
   *p_restart_output = false;
@@ -292,7 +304,7 @@ static void a2dp_sbc_encoder_update(uint16_t peer_mtu,
     s16SamplingFreq = 48000;
 
   // Set the initial target bit rate
-  p_encoder_params->u16BitRate = a2dp_sbc_source_rate();
+  p_encoder_params->u16BitRate = a2dp_sbc_source_rate(a2dp_codec_config->getCodecUserConfig().codec_specific_1);
 
   LOG_DEBUG(LOG_TAG, "%s: MTU=%d, peer_mtu=%d min_bitpool=%d max_bitpool=%d",
             __func__, a2dp_sbc_encoder_cb.TxAaMtuSize, peer_mtu, min_bitpool,
@@ -394,6 +406,21 @@ static void a2dp_sbc_encoder_update(uint16_t peer_mtu,
   /* Reset the SBC encoder */
   SBC_Encoder_Init(&a2dp_sbc_encoder_cb.sbc_encoder_params);
   a2dp_sbc_encoder_cb.tx_sbc_frames = calculate_max_frames_per_packet();
+
+  if( p_encoder_params->u16BitRate > 496 ) {
+      osi_property_set("baikal.last.a2dp_codec","SBC HDX");
+  } else if ( p_encoder_params->u16BitRate > 338 ) {
+      osi_property_set("baikal.last.a2dp_codec","SBC HD");
+  } else {
+      if( p_encoder_params->s16ChannelMode == SBC_DUAL ) {
+          osi_property_set("baikal.last.a2dp_codec","SBC DC");
+      } else {
+          osi_property_set("baikal.last.a2dp_codec","SBC");
+      }
+  }
+
+  snprintf ( strBitRate, 16, "%d", p_encoder_params->u16BitRate);
+  osi_property_set("baikal.last.a2dp_bitrate", strBitRate);
 }
 
 void a2dp_sbc_encoder_cleanup(void) {
@@ -869,7 +896,7 @@ static uint8_t calculate_max_frames_per_packet(void) {
   return result;
 }
 
-static uint16_t a2dp_sbc_source_rate() {
+static uint16_t a2dp_sbc_source_rate(int bitrate) {
   uint16_t rate = A2DP_SBC_DEFAULT_BITRATE;
 
   if (a2dp_sbc_encoder_cb.sbc_encoder_params.s16SamplingFreq == SBC_sf48000)
@@ -896,7 +923,22 @@ static uint16_t a2dp_sbc_source_rate() {
     rate = A2DP_SBC_NON_EDR_MAX_RATE;
     LOG_VERBOSE(LOG_TAG, "%s: non-edr a2dp sink detected, restrict rate to %d",
                 __func__, rate);
+    return rate;
   }
+
+  if( bitrate > 0 ) {
+      /* 3DH5 maximum bitrates */
+      if( bitrate > A2DP_SBC_DEFAULT_BITRATE &&
+        a2dp_sbc_encoder_cb.TxAaMtuSize >= MIN_3MBPS_AVDTP_SAFE_MTU) {
+        /* 3DH5 alternative bitrates */
+
+        rate = bitrate;
+        LOG_DEBUG(LOG_TAG, "%s: a2dp 3Mbps HDX rate %d", __func__, rate);
+        return rate;
+      } 
+  }
+
+  LOG_VERBOSE(LOG_TAG, "%s: a2dp default EDR rate %d", __func__, rate);
 
   return rate;
 }
